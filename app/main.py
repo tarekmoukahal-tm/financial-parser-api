@@ -15,36 +15,7 @@ def extract_raw_pdf_text(pdf_bytes: bytes) -> str:
             text += page.get_text()
     return text
 
-def parse_bank_statement_local(raw_text: str) -> dict:
-    """Extracts key statement metrics and transactions using regular expressions."""
-    # Simple regex patterns for common bank statement fields
-    account_number_match = re.search(r'(?:Account|Acc)\s*#?:?\s*(\d+[\d\-]+)', raw_text, re.IGNORECASE)
-    date_range_match = re.search(r'(?:Statement Period|Date):\s*([A-Za-z0-9\s,\-/]+)', raw_text, re.IGNORECASE)
-    
-    # Extract numeric values formatted as currency ($X,XXX.XX)
-    amounts = re.findall(r'\$?\b\d{1,3}(?:,\d{3})*\.\d{2}\b', raw_text)
-    
-    # Extract line items looking like: MM/DD Description $Amount
-    lines = raw_text.split('\n')
-    transactions = []
-    transaction_pattern = re.compile(r'(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\s+(.*?)\s+\$?(-?\d{1,3}(?:,\d{3})*\.\d{2})')
-    
-    for line in lines:
-        match = transaction_pattern.search(line.strip())
-        if match:
-            transactions.append({
-                "date": match.group(1),
-                "description": match.group(2).strip(),
-                "amount": match.group(3)
-            })
-
-    return {
-        "account_number": account_number_match.group(1) if account_number_match else "Not Found",
-        "statement_period": date_range_match.group(1).strip() if date_range_match else "Not Found",
-        "extracted_amounts_found": len(amounts),
-        "detected_transactions": transactions,
-        "sample_amounts": amounts[:5]
-    }
+parse_bank_statement_local
 
 @app.get("/")
 def root():
