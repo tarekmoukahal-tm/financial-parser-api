@@ -8,7 +8,7 @@ from openai import OpenAI
 
 
 # ------------------------------------------------------------------
-# Pydantic Schemas
+# Pydantic Schemas - Bank Statement
 # ------------------------------------------------------------------
 
 class StatementSummary(BaseModel):
@@ -56,12 +56,97 @@ class StatementParseResponse(BaseModel):
 
 
 # ------------------------------------------------------------------
+# Pydantic Schemas - Form W-2
+# ------------------------------------------------------------------
+
+class W2EmployerInfo(BaseModel):
+    ein: Optional[str] = Field(None, description="Employer Identification Number (EIN)")
+    name: Optional[str] = Field(None, description="Employer name")
+    address: Optional[str] = Field(None, description="Employer address")
+
+
+class W2EmployeeInfo(BaseModel):
+    ssn: Optional[str] = Field(None, description="Employee Social Security Number")
+    name: Optional[str] = Field(None, description="Employee name")
+    address: Optional[str] = Field(None, description="Employee address")
+
+
+class W2WagesAndTaxes(BaseModel):
+    wages_tips_compensation: Optional[float] = Field(None, description="Box 1: Wages, tips, other comp.")
+    federal_income_tax_withheld: Optional[float] = Field(None, description="Box 2: Federal income tax withheld")
+    social_security_wages: Optional[float] = Field(None, description="Box 3: Social security wages")
+    social_security_tax_withheld: Optional[float] = Field(None, description="Box 4: Social security tax withheld")
+    medicare_wages_and_tips: Optional[float] = Field(None, description="Box 5: Medicare wages and tips")
+    medicare_tax_withheld: Optional[float] = Field(None, description="Box 6: Medicare tax withheld")
+    social_security_tips: Optional[float] = Field(None, description="Box 7: Social security tips")
+    allocated_tips: Optional[float] = Field(None, description="Box 8: Allocated tips")
+
+
+class W2StateTaxInfo(BaseModel):
+    state: Optional[str] = Field(None, description="Box 15: Employer state ID code")
+    employer_state_id: Optional[str] = Field(None, description="Box 15: Employer's state ID number")
+    state_wages: Optional[float] = Field(None, description="Box 16: State wages, tips, etc.")
+    state_income_tax: Optional[float] = Field(None, description="Box 17: State income tax")
+
+
+class W2Data(BaseModel):
+    tax_year: Optional[str] = Field(None, description="Tax Year for the W-2 form")
+    employer: W2EmployerInfo
+    employee: W2EmployeeInfo
+    compensation_and_taxes: W2WagesAndTaxes
+    state_tax: Optional[W2StateTaxInfo] = None
+
+
+class W2ParseResponse(BaseModel):
+    status: str
+    parsing_engine: str
+    filename: str
+    data: W2Data
+    raw_text_snippet: str
+
+
+# ------------------------------------------------------------------
+# Pydantic Schemas - SEC Form 10-K
+# ------------------------------------------------------------------
+
+class SECCompanyHeader(BaseModel):
+    company_name: Optional[str] = Field(None, description="Exact registrant company name")
+    cik: Optional[str] = Field(None, description="Central Index Key (CIK)")
+    fiscal_year_ended: Optional[str] = Field(None, description="Fiscal year end date")
+    trading_symbol: Optional[str] = Field(None, description="Ticker symbol if available")
+
+
+class SECFinancialMetrics(BaseModel):
+    total_revenue: Optional[float] = Field(None, description="Total net revenues / sales")
+    gross_profit: Optional[float] = Field(None, description="Gross profit")
+    operating_income: Optional[float] = Field(None, description="Operating income / loss")
+    net_income: Optional[float] = Field(None, description="Net income / loss")
+    total_assets: Optional[float] = Field(None, description="Total assets")
+    total_liabilities: Optional[float] = Field(None, description="Total liabilities")
+    total_stockholders_equity: Optional[float] = Field(None, description="Total stockholders' equity")
+
+
+class SEC10KData(BaseModel):
+    company: SECCompanyHeader
+    financials: SECFinancialMetrics
+    risk_factors_summary: Optional[str] = Field(None, description="Brief high-level summary of Item 1A Risk Factors")
+
+
+class SEC10KParseResponse(BaseModel):
+    status: str
+    parsing_engine: str
+    filename: str
+    data: SEC10KData
+    raw_text_snippet: str
+
+
+# ------------------------------------------------------------------
 # FastAPI Application & Global Setup
 # ------------------------------------------------------------------
 
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
-    version="6.5.2"
+    version="6.6.0"
 )
 
 # Initialize OpenAI client if key exists
@@ -78,6 +163,10 @@ def extract_raw_pdf_text(pdf_bytes: bytes) -> str:
     return text
 
 
+# ------------------------------------------------------------------
+# Engine Logic - Bank Statement
+# ------------------------------------------------------------------
+
 def run_reconciliation_and_audit(
     account_number: str,
     statement_period: str,
@@ -87,9 +176,6 @@ def run_reconciliation_and_audit(
     ending: Optional[float],
     transactions: List[Transaction]
 ) -> StatementData:
-    """Runs mathematical reconciliation and transaction-level audit checks."""
-    
-    # Summary balance reconciliation
     reconciliation = MathReconciliation(calculated_ending_balance=None, discrepancy=0.0, is_reconciled=False)
     if None not in (opening, deposits, withdrawals, ending):
         calc_ending = round(opening + deposits - withdrawals, 2)
@@ -100,7 +186,6 @@ def run_reconciliation_and_audit(
             is_reconciled=(discrepancy < 0.01)
         )
 
-    # Transaction-level accumulation
     sum_credits = 0.0
     sum_debits = 0.0
     for tx in transactions:
@@ -139,7 +224,6 @@ def run_reconciliation_and_audit(
 
 
 def parse_statement_local_regex(raw_text: str) -> StatementData:
-    """Fallback Engine: Regex extraction via PyMuPDF."""
     account_number_match = re.search(r'Account\s*Number:\s*([\*\d\-]+)', raw_text, re.IGNORECASE)
     date_range_match = re.search(r'Statement\s*Period:\s*([^\n\r]+)', raw_text, re.IGNORECASE)
     
@@ -180,11 +264,9 @@ def parse_statement_local_regex(raw_text: str) -> StatementData:
 
 
 def parse_statement_openai(raw_text: str) -> StatementData:
-    """Primary Engine: OpenAI structured extraction."""
     if not client:
         raise ValueError("OpenAI client not initialized (missing OPENAI_API_KEY).")
 
-    # Inner Pydantic schema for raw LLM extraction
     class RawLLMExtraction(BaseModel):
         account_number: str
         statement_period: str
@@ -218,12 +300,117 @@ def parse_statement_openai(raw_text: str) -> StatementData:
 
 
 # ------------------------------------------------------------------
+# Engine Logic - Form W-2
+# ------------------------------------------------------------------
+
+def parse_w2_local_regex(raw_text: str) -> W2Data:
+    tax_year_match = re.search(r'Form\s*W-2\s*(\d{4})', raw_text, re.IGNORECASE)
+    ein_match = re.search(r'Employer\s*identification\s*number\s*\(EIN\):\s*([\d\-]+)', raw_text, re.IGNORECASE)
+    ssn_match = re.search(r'Social\s*security\s*number:\s*([\d\-]+)', raw_text, re.IGNORECASE)
+
+    wages_match = re.search(r'1\s*Wages,\s*tips,\s*other\s*comp\.\:\s*\$?([\d,]+\.\d{2})', raw_text, re.IGNORECASE)
+    fed_tax_match = re.search(r'2\s*Federal\s*income\s*tax\s*withheld:\s*\$?([\d,]+\.\d{2})', raw_text, re.IGNORECASE)
+    ss_wages_match = re.search(r'3\s*Social\s*security\s*wages:\s*\$?([\d,]+\.\d{2})', raw_text, re.IGNORECASE)
+    ss_tax_match = re.search(r'4\s*Social\s*security\s*tax\s*withheld:\s*\$?([\d,]+\.\d{2})', raw_text, re.IGNORECASE)
+    med_wages_match = re.search(r'5\s*Medicare\s*wages\s*and\s*tips:\s*\$?([\d,]+\.\d{2})', raw_text, re.IGNORECASE)
+    med_tax_match = re.search(r'6\s*Medicare\s*tax\s*withheld:\s*\$?([\d,]+\.\d{2})', raw_text, re.IGNORECASE)
+
+    def to_float(match):
+        return float(match.group(1).replace(',', '')) if match else None
+
+    return W2Data(
+        tax_year=tax_year_match.group(1) if tax_year_match else None,
+        employer=W2EmployerInfo(
+            ein=ein_match.group(1) if ein_match else None,
+            name="Extracted via Local Parser",
+            address=None
+        ),
+        employee=W2EmployeeInfo(
+            ssn=ssn_match.group(1) if ssn_match else None,
+            name="Extracted via Local Parser",
+            address=None
+        ),
+        compensation_and_taxes=W2WagesAndTaxes(
+            wages_tips_compensation=to_float(wages_match),
+            federal_income_tax_withheld=to_float(fed_tax_match),
+            social_security_wages=to_float(ss_wages_match),
+            social_security_tax_withheld=to_float(ss_tax_match),
+            medicare_wages_and_tips=to_float(med_wages_match),
+            medicare_tax_withheld=to_float(med_tax_match)
+        )
+    )
+
+
+def parse_w2_openai(raw_text: str) -> W2Data:
+    if not client:
+        raise ValueError("OpenAI client not initialized (missing OPENAI_API_KEY).")
+
+    completion = client.beta.chat.completions.parse(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Extract structured Form W-2 tax data from the provided document text."},
+            {"role": "user", "content": raw_text}
+        ],
+        response_format=W2Data,
+        temperature=0.0
+    )
+
+    return completion.choices[0].message.parsed
+
+
+# ------------------------------------------------------------------
+# Engine Logic - SEC Form 10-K
+# ------------------------------------------------------------------
+
+def parse_sec_10k_local_regex(raw_text: str) -> SEC10KData:
+    company_match = re.search(r'COMPANY\s*CONFORMED\s*NAME:\s*([^\n\r]+)', raw_text, re.IGNORECASE)
+    cik_match = re.search(r'CENTRAL\s*INDEX\s*KEY:\s*(\d+)', raw_text, re.IGNORECASE)
+    fy_match = re.search(r'CONFORMED\s*PERIOD\s*OF\s*REPORT:\s*(\d{8}|\d{4}-\d{2}-\d{2})', raw_text, re.IGNORECASE)
+
+    rev_match = re.search(r'(?:Total\s*Revenues?|Net\s*Sales):\s*\$?([\d,]+(?:\.\d{2})?)', raw_text, re.IGNORECASE)
+    net_inc_match = re.search(r'Net\s*Income:\s*\$?([\d,]+(?:\.\d{2})?)', raw_text, re.IGNORECASE)
+
+    def to_float(match):
+        return float(match.group(1).replace(',', '')) if match else None
+
+    return SEC10KData(
+        company=SECCompanyHeader(
+            company_name=company_match.group(1).strip() if company_match else "Unknown Company",
+            cik=cik_match.group(1) if cik_match else None,
+            fiscal_year_ended=fy_match.group(1) if fy_match else None
+        ),
+        financials=SECFinancialMetrics(
+            total_revenue=to_float(rev_match),
+            net_income=to_float(net_inc_match)
+        ),
+        risk_factors_summary="Regex extraction active. OpenAI required for full NLP risk factor summarization."
+    )
+
+
+def parse_sec_10k_openai(raw_text: str) -> SEC10KData:
+    if not client:
+        raise ValueError("OpenAI client not initialized (missing OPENAI_API_KEY).")
+
+    completion = client.beta.chat.completions.parse(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Extract structured corporate metrics and financial data from the SEC Form 10-K filing text."},
+            {"role": "user", "content": raw_text[:20000]}  # Window text sample
+        ],
+        response_format=SEC10KData,
+        temperature=0.0
+    )
+
+    return completion.choices[0].message.parsed
+
+
+# ------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------
 
 @app.get("/")
 def root():
-    return {"status": "online", "version": "6.5.2", "mode": "smart_hybrid_fallback"}
+    return {"status": "online", "version": "6.6.0", "mode": "smart_hybrid_fallback"}
 
 
 @app.post("/v1/parse/statement", response_model=StatementParseResponse)
@@ -232,12 +419,10 @@ async def parse_statement(file: UploadFile = File(...)):
         pdf_bytes = await file.read()
         raw_text = extract_raw_pdf_text(pdf_bytes)
         
-        # 1. Try OpenAI First
         try:
             structured_data = parse_statement_openai(raw_text)
             engine_used = "OpenAI_gpt-4o-mini"
         except Exception as openai_err:
-            # 2. Fall back to PyMuPDF + Regex on error
             structured_data = parse_statement_local_regex(raw_text)
             engine_used = f"PyMuPDF_Regex_Fallback (OpenAI Reason: {str(openai_err)[:100]})"
         
@@ -252,15 +437,49 @@ async def parse_statement(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Document Processing Error: {str(e)}")
 
 
-@app.post("/v1/parse/w2")
+@app.post("/v1/parse/w2", response_model=W2ParseResponse)
 async def parse_w2(file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
-    raw_text = extract_raw_pdf_text(pdf_bytes)
-    return {"status": "success", "parsing_engine": "PyMuPDF_Local", "doc_type": "W-2", "raw_text_snippet": raw_text[:500]}
+    try:
+        pdf_bytes = await file.read()
+        raw_text = extract_raw_pdf_text(pdf_bytes)
+
+        try:
+            structured_data = parse_w2_openai(raw_text)
+            engine_used = "OpenAI_gpt-4o-mini"
+        except Exception as openai_err:
+            structured_data = parse_w2_local_regex(raw_text)
+            engine_used = f"PyMuPDF_Regex_Fallback (OpenAI Reason: {str(openai_err)[:100]})"
+
+        return W2ParseResponse(
+            status="success",
+            parsing_engine=engine_used,
+            filename=file.filename,
+            data=structured_data,
+            raw_text_snippet=raw_text[:300] + "..." if len(raw_text) > 300 else raw_text
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"W-2 Processing Error: {str(e)}")
 
 
-@app.post("/v1/parse/sec-10k")
+@app.post("/v1/parse/sec-10k", response_model=SEC10KParseResponse)
 async def parse_sec_10k(file: UploadFile = File(...)):
-    pdf_bytes = await file.read()
-    raw_text = extract_raw_pdf_text(pdf_bytes)
-    return {"status": "success", "parsing_engine": "PyMuPDF_Local", "doc_type": "SEC-10K", "raw_text_snippet": raw_text[:500]}
+    try:
+        pdf_bytes = await file.read()
+        raw_text = extract_raw_pdf_text(pdf_bytes)
+
+        try:
+            structured_data = parse_sec_10k_openai(raw_text)
+            engine_used = "OpenAI_gpt-4o-mini"
+        except Exception as openai_err:
+            structured_data = parse_sec_10k_local_regex(raw_text)
+            engine_used = f"PyMuPDF_Regex_Fallback (OpenAI Reason: {str(openai_err)[:100]})"
+
+        return SEC10KParseResponse(
+            status="success",
+            parsing_engine=engine_used,
+            filename=file.filename,
+            data=structured_data,
+            raw_text_snippet=raw_text[:300] + "..." if len(raw_text) > 300 else raw_text
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SEC 10-K Processing Error: {str(e)}")
